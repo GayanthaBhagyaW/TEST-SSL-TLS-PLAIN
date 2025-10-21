@@ -1,0 +1,98 @@
+Clear-Host
+Write-Host "=== SSL/TLS/Socket Checker ===" -ForegroundColor Cyan
+Write-Host ""
+
+# Prompt for input
+$TargetHost = Read-Host "Enter the hostname or IP address"
+$Port = Read-Host "Enter the port number"
+
+# Resolve hostname to IP
+try {
+    $IPs = [System.Net.Dns]::GetHostAddresses($TargetHost)
+    $ResolvedIPs = $IPs | ForEach-Object { $_.IPAddressToString }
+    Write-Host "Resolved IP(s): $($ResolvedIPs -join ', ')" -ForegroundColor Cyan
+}
+catch {
+    Write-Host "Could not resolve hostname '$TargetHost': $($_.Exception.Message)" -ForegroundColor Red
+    exit
+}
+
+# Protocols to test (newest first)
+$Protocols = @{
+    "TLSv1.3" = 12288
+    "TLSv1.2" = [System.Security.Authentication.SslProtocols]::Tls12
+    "TLSv1.1" = [System.Security.Authentication.SslProtocols]::Tls11
+    "TLSv1.0" = [System.Security.Authentication.SslProtocols]::Tls
+    "SSLv3"   = [System.Security.Authentication.SslProtocols]::Ssl3
+}
+
+Write-Host "`nTesting SSL/TLS protocols for $TargetHost on port $Port..." -ForegroundColor Yellow
+Write-Host ""
+
+foreach ($entry in $Protocols.GetEnumerator()) {
+    $protoName = $entry.Key
+    $protoValue = $entry.Value
+
+    $tcpClient = $null
+    $sslStream = $null
+
+    try {
+        # Create tcp client and connect
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $iar = $tcpClient.BeginConnect($TargetHost, [int]$Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne(5000)) { throw [System.TimeoutException] "Connect timeout" }
+        $tcpClient.EndConnect($iar)
+
+        # Wrap stream in SslStream
+        $sslStream = New-Object System.Net.Security.SslStream(
+            $tcpClient.GetStream(),
+            $false,
+            { $true }
+        )
+
+        # Attempt TLS/SSL handshake for the specific protocol
+        $sslStream.AuthenticateAsClient($TargetHost, $null, $protoValue, $false)
+
+        if ($sslStream.IsAuthenticated) {
+            Write-Host "[+] $protoName ACCEPTED" -ForegroundColor Green
+        } else {
+            Write-Host "[-] $protoName DENIED (handshake completed but not authenticated)" -ForegroundColor Red
+        }
+    }
+    catch [System.Security.Authentication.AuthenticationException] {
+        Write-Host "[-] $protoName DENIED (authentication required)" -ForegroundColor Red
+    }
+    catch [System.TimeoutException] {
+        Write-Host "[-] $protoName DENIED (connection timed out)" -ForegroundColor Red
+    }
+    catch [System.Net.Sockets.SocketException] {
+        Write-Host "[-] $protoName DENIED (socket error: $($_.Exception.Message))" -ForegroundColor Red
+    }
+    catch {
+        Write-Host "[-] $protoName DENIED ($($_.Exception.GetType().Name): $($_.Exception.Message))" -ForegroundColor Red
+    }
+    finally {
+        try { if ($sslStream -ne $null) { $sslStream.Close() } } catch {}
+        try { if ($tcpClient -ne $null) { $tcpClient.Close() } } catch {}
+    }
+}
+
+# Test plain TCP connection
+Write-Host ""
+try {
+    $tcpTest = New-Object System.Net.Sockets.TcpClient
+    $iar2 = $tcpTest.BeginConnect($TargetHost, [int]$Port, $null, $null)
+    if (-not $iar2.AsyncWaitHandle.WaitOne(5000)) { throw [System.TimeoutException] "Plain TCP connect timeout" }
+    $tcpTest.EndConnect($iar2)
+    Write-Host "[+] Plain TCP connection accepted" -ForegroundColor Green
+    $tcpTest.Close()
+}
+catch [System.TimeoutException] {
+    Write-Host "[-] Plain TCP connection denied (timeout)" -ForegroundColor Red
+}
+catch {
+    Write-Host "[-] Plain TCP connection denied ($($_.Exception.GetType().Name): $($_.Exception.Message))" -ForegroundColor Red
+}
+
+Write-Host "`nCheck complete!" -ForegroundColor Cyan
+Read-Host -Prompt "Press Enter to exit"
